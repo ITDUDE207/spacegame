@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bridge Crew</title>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#151a30;--panel:#222a4b;--ink:#f2f4ff;--dim:#9aa3c7}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:var(--bg);color:var(--ink);font-family:'Fredoka',system-ui,sans-serif}
+main{max-width:720px;margin:0 auto;padding:max(16px,env(safe-area-inset-top)) 16px 32px}
+h1{font-size:2.6rem;margin:.6em 0 .2em}
+p{color:var(--dim);line-height:1.5;max-width:46ch}
+input,button{font:inherit;border-radius:14px;border:2px solid #38426e;background:#1b2240;color:var(--ink);padding:12px 14px}
+button{cursor:pointer;background:#2c3763}
+button:focus-visible,input:focus-visible{outline:3px solid #fff;outline-offset:2px}
+button.go{background:#ffbf47;color:#241a00;border-color:transparent;font-weight:600}
+[hidden]{display:none!important}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}
+.code{font-size:3.4rem;font-weight:700;letter-spacing:.12em;margin:.2em 0}
+#err{color:#ff7a6b}
+.top{display:flex;justify-content:space-between;align-items:center;gap:12px;color:var(--dim);margin-bottom:8px}
+.top div:first-child{flex:1}
+.hull{height:14px;border-radius:9px;background:#1b2240;overflow:hidden}
+.hull i{display:block;height:100%;transition:width .25s}
+.crew{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+.chip{padding:4px 10px;border-radius:99px;background:#1b2240;font-size:.9rem}
+.order{background:var(--ink);color:#151a30;border-radius:22px;padding:18px 20px;margin:12px 0}
+.order p{margin:0 0 12px;color:inherit;font-size:1.7rem;font-weight:600;line-height:1.2}
+.fuse{height:12px;border-radius:7px;background:#c9cfee;overflow:hidden}
+.fuse i{display:block;height:100%;background:#151a30;transform-origin:left}
+.panel{background:var(--panel);border-radius:20px;padding:14px;margin:14px 0;border-top:8px solid var(--c)}
+.panel h2{margin:0 0 10px;font-size:1.1rem}
+.ctl{margin:12px 0}
+.ctl b{display:block;margin-bottom:6px;font-weight:500}
+.opts{display:flex;gap:8px}
+.opts button{flex:1;min-height:48px;padding:6px}
+.opts button.on{background:var(--c);color:#151a30;border-color:transparent;font-weight:600}
+.cams{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:14px 0}
+.cams figure{margin:0}
+.cams canvas{width:100%;aspect-ratio:16/9;display:block;border-radius:14px;border:3px solid #4cc9f0;background:#0a0e1f}
+.cams figcaption{font-size:.85rem;color:var(--dim);margin-top:4px}
+.cams p{grid-column:1/-1;margin:0;font-size:.9rem}
+#flash{position:fixed;inset:0;background:#ff4d3d;opacity:0;pointer-events:none}
+</style>
+</head>
+<body>
+<main id="join">
+  <h1>Bridge Crew</h1>
+  <p>Each of you runs part of the ship. Your orders are for controls on someone else's panel, so call them out and answer when others call yours.</p>
+  <div class="row"><input id="name" placeholder="Your name" maxlength="14" autocomplete="off"></div>
+  <div class="row">
+    <button class="go" id="create">Create room</button>
+    <input id="room" placeholder="Room code" maxlength="4" size="8" autocapitalize="characters" autocomplete="off">
+    <button id="joinBtn">Join room</button>
+  </div>
+  <p id="err"></p>
+</main>
+
+<main id="lobby" hidden>
+  <p>Room code</p>
+  <div class="code" id="code"></div>
+  <p>Invite link: <span id="link"></span></p>
+  <p id="roster"></p>
+  <p id="result"></p>
+  <div class="row"><button class="go" id="start" hidden>Launch</button></div>
+  <p id="wait" hidden>Waiting for the room's host to launch. Best with 2 to 4 players on a call.</p>
+</main>
+
+<main id="play" hidden>
+  <div class="top"><div class="hull"><i id="hull"></i></div><div id="score"></div></div>
+  <div class="crew" id="crew"></div>
+  <section class="order"><p id="order"></p><div class="fuse"><i id="fuse"></i></div></section>
+  <section class="cams" id="cams" hidden></section>
+  <div id="board"></div>
+</main>
+
+<div id="flash"></div>
+
+<main id="lost" hidden>
+  <h1>Connection lost</h1>
+  <p>Reload the page to rejoin. The first connection on a sleeping server can take about a minute.</p>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const COLORS = { Steering: '#4cc9f0', Shields: '#b79cff', Weapons: '#ff7a6b', Engines: '#ffbf47' };
+let ws, state, sig = '', deadline = 0, total = 1, space = [], spaceAt = 0;
+
+// Four cameras around the hull. Each shows objects whose bearing falls inside its field of view.
+const CAMS = [['Front', 0], ['Starboard', Math.PI / 2], ['Rear', Math.PI], ['Port', -Math.PI / 2]];
+const FOV = 1.9;
+const norm = (x) => Math.atan2(Math.sin(x), Math.cos(x));
+const camCanvases = CAMS.map(([name]) => {
+  const f = document.createElement('figure'), c = document.createElement('canvas'), cap = document.createElement('figcaption');
+  c.width = 400; c.height = 225;
+  cap.textContent = name + ' camera';
+  f.append(c, cap);
+  $('#cams').append(f);
+  return c;
+});
+const hint = document.createElement('p');
+hint.textContent = 'Ringed objects are on a collision course. Starboard hazard: set Rudder Trim to Left. Port hazard: set it to Right. Front hazard: either side works.';
+$('#cams').append(hint);
+const stars = CAMS.map(() => Array.from({ length: 45 }, () => [Math.random(), Math.random(), Math.random() < 0.2 ? 2 : 1]));
+
+function drawCams() {
+  const dt = (performance.now() - spaceAt) / 1000; // glide between server updates
+  CAMS.forEach(([, centre], i) => {
+    const cv = camCanvases[i], g = cv.getContext('2d'), W = cv.width, H = cv.height;
+    g.fillStyle = '#0a0e1f';
+    g.fillRect(0, 0, W, H);
+    g.fillStyle = '#e8ebff';
+    stars[i].forEach(([x, y, s]) => g.fillRect(x * W, y * H, s, s));
+    space.forEach((o) => {
+      const d = o.d - o.v * dt, diff = norm(o.a + o.w * dt - centre);
+      if (d <= 0.03 || Math.abs(diff) > FOV / 2) return;
+      const near = 1 - d, rad = (4 + 46 * near * near) * o.r;
+      const x = W * (0.5 + diff / FOV), y = H * (0.5 + (((o.id * 37) % 40) - 20) / 100 * (0.3 + near));
+      g.beginPath();
+      if (o.k === 'ship') {
+        g.moveTo(x, y - rad); g.lineTo(x + rad, y + rad * 0.7); g.lineTo(x - rad, y + rad * 0.7);
+        g.fillStyle = '#ff7a6b';
+      } else {
+        for (let k = 0; k < 8; k++) {
+          const t = (k / 8) * 6.283 + o.id, rr = rad * (0.75 + ((o.id * (k + 3)) % 7) / 20);
+          g.lineTo(x + Math.cos(t) * rr, y + Math.sin(t) * rr);
+        }
+        g.fillStyle = '#7b7f99';
+      }
+      g.closePath();
+      g.fill();
+      if (o.hz) {
+        g.strokeStyle = '#ffbf47';
+        g.lineWidth = 3;
+        g.beginPath();
+        g.arc(x, y, rad + 8 + 3 * Math.sin(performance.now() / 120), 0, 6.283);
+        g.stroke();
+      }
+    });
+  });
+}
+
+function connect(room) {
+  if (ws) return;
+  $('#err').textContent = '';
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
+  ws.onopen = () => ws.send(JSON.stringify({ t: 'join', name: $('#name').value.trim() || 'Crew', room }));
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.t === 'error') { $('#err').textContent = m.msg; ws.close(); ws = null; return; }
+    state = m;
+    if (m.space) { space = m.space; spaceAt = performance.now(); }
+    if (m.fx === 'hit') hit();
+    if (m.instr) { deadline = performance.now() + m.instr.left; total = m.instr.total; }
+    show();
+  };
+  ws.onclose = () => {
+    if (!state) return;
+    document.querySelectorAll('main').forEach((x) => { x.hidden = true; });
+    $('#lost').hidden = false;
+  };
+}
+
+function show() {
+  const s = state, playing = s.phase === 'play';
+  $('#join').hidden = true;
+  $('#lobby').hidden = playing;
+  $('#play').hidden = !playing;
+  if (!playing) {
+    sig = '';
+    $('#code').textContent = s.code;
+    $('#link').textContent = location.origin + '/?room=' + s.code;
+    $('#roster').textContent = 'Crew (' + s.crew.length + '/4): ' + s.crew.map((c) => c.name).join(', ');
+    const need = s.crew.length < s.min ? 'You need at least ' + s.min + ' players to launch.' : '';
+    $('#result').textContent = (s.phase === 'over' ? 'Hull breached after ' + s.score + ' orders. ' : '') + need;
+    $('#start').disabled = s.crew.length < s.min;
+    $('#start').hidden = !s.host;
+    $('#start').textContent = s.phase === 'over' ? 'Fly again' : 'Launch';
+    $('#wait').hidden = s.host;
+    return;
+  }
+  $('#hull').style.width = s.hull + '%';
+  $('#hull').style.background = s.hull < 35 ? '#ff7a6b' : '#5be3a1';
+  $('#score').textContent = s.score + ' orders, ' + s.dodges + ' dodges';
+  $('#order').textContent = s.instr.text;
+  $('#cams').hidden = !s.space;
+  $('#crew').replaceChildren(...s.crew.map((c) => {
+    const e = document.createElement('span');
+    e.className = 'chip';
+    e.textContent = c.name + ': ' + c.stations.join(' + ');
+    return e;
+  }));
+  // Rebuild the panels only when a control changes, so taps are never swallowed mid-press.
+  const next = JSON.stringify(s.controls);
+  if (next === sig) return;
+  sig = next;
+  const groups = {};
+  s.controls.forEach((c) => (groups[c.station] ||= []).push(c));
+  $('#board').innerHTML = Object.entries(groups).map(([st, cs]) =>
+    `<section class="panel" style="--c:${COLORS[st]}"><h2>${st}</h2>${cs.map((c) =>
+      `<div class="ctl"><b>${c.name}</b><div class="opts">${c.options.map((o) =>
+        `<button data-id="${c.id}" data-v="${o}" class="${o === c.value ? 'on' : ''}">${o}</button>`).join('')}</div></div>`).join('')}</section>`).join('');
+}
+
+function hit() {
+  navigator.vibrate?.(200);
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  $('#flash').animate([{ opacity: 0.45 }, { opacity: 0 }], 450);
+  $('#play').animate([{ transform: 'translateX(-8px)' }, { transform: 'translateX(8px)' }, { transform: 'translateX(0)' }], 250);
+}
+
+(function frame() {
+  $('#fuse').style.transform = 'scaleX(' + Math.max(0, (deadline - performance.now()) / total) + ')';
+  if (!$('#cams').hidden) drawCams();
+  requestAnimationFrame(frame);
+})();
+
+$('#board').onclick = (e) => {
+  const b = e.target.closest('button[data-id]');
+  if (b) ws.send(JSON.stringify({ t: 'set', id: b.dataset.id, value: b.dataset.v }));
+};
+$('#create').onclick = () => connect('');
+$('#joinBtn').onclick = () => connect($('#room').value);
+$('#start').onclick = () => ws.send(JSON.stringify({ t: 'start' }));
+$('#room').value = (new URLSearchParams(location.search).get('room') || '').toUpperCase();
+</script>
+</body>
+</html>
